@@ -2,7 +2,7 @@
 
 Comparison of single-cell integration methods
 
-[royfrancis.github.io/sc-integration/](royfrancis.github.io/sc-integration/)
+[https://royfrancis.github.io/sc-integration/](https://royfrancis.github.io/sc-integration/)
 
 ## Usage
 
@@ -10,19 +10,19 @@ Computations were run on Uppmax Rackham cluster. A docker container with all nec
 
 :warning: 17GB image!
 
-```
+```bash
 docker pull ghcr.io/royfrancis/r44q15s5:1.0.3
 ```
 
 The docker image was converted to singularity sif file locally.
 
-```
+```bash
 docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v $(pwd):/work kaczmarj/apptainer build r44q15s5-1.0.3.sif docker://ghcr.io/royfrancis/r44q15s5:1.0.3
 ```
 
 The sif file was upload to Uppmax. The quarto document `index1.qmd` is run inside the container. The script used to run integration looks as shown below. This can be submitted as an SLURM job.
 
-```
+```bash
 #!/bin/sh
 
 #SBATCH -A naiss2024-XX-XXX
@@ -45,7 +45,7 @@ apptainer run --cleanenv ${SIF} quarto render "pan.qmd" -o pan.html --to html --
 
 Inside the container, in an R script, to use python module, set `PYTHONPATH` before loading reticulate.
 
-```
+```r
 Sys.setenv(PYTHONPATH="/home/rstudio/.local/lib/python3.10/site-packages")
 library(reticulate)
 import("scanpy")
