@@ -43,6 +43,10 @@ ln -sf index1.qmd pan.qmd
 apptainer run --cleanenv ${SIF} quarto render "pan.qmd" -o pan.html --to html --execute-dir ./pan -P label:pan -P batch:tech -P grp:celltype -P metrics_ilp:21 -P title:Panc8 -P subtitle:"Single-Cell Integration" -P description:"Comparison of different integration methods. Integration of 13 pancreatic celltypes from 5 different technologies."
 ```
 
+A seurat v5 object named `obj.rds` must be made available inside execution directory (`--execute-dir ./pan` above).
+
+## Reticulate & Python
+
 Inside the container, in an R script, to use python module, set `PYTHONPATH` before loading reticulate.
 
 ```r
