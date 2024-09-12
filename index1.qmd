@@ -70,12 +70,6 @@ library(SeuratWrappers)
 # remotes::install_github("carmonalab/scIntegrationMetrics")
 library(scIntegrationMetrics)
 
-library(plummy)
-library(showtext)
-plummy::import_barlow()
-showtext::showtext_auto()
-showtext::showtext_opts(dpi = 300)
-
 # set future globals size to 6.2GB
 options(future.globals.maxSize = 6.2 * 1024 * 1024^2)
 ```
@@ -176,7 +170,7 @@ fn_getmetrics <- function(seu, batch, grp, metrics_ilp, metrics_red) {
 }
 
 theme_umap <- function() {
-  theme_minimal(base_family = "barlow", base_size = 9) +
+  theme_minimal(base_size = 9) +
     theme(
       panel.grid = element_blank(),
       axis.text = element_blank(),
@@ -191,7 +185,7 @@ theme_umap <- function() {
 }
 
 theme_report <- function() {
-  theme_minimal(base_family = "barlow", base_size = 9) +
+  theme_minimal(base_size = 9) +
     theme(
       plot.margin = margin(15, 15, 15, 15),
       plot.background = element_rect(fill = "white", color = "white")
