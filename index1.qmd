@@ -1,0 +1,866 @@
+---
+title: "`r params$title`"
+subtitle: "`r params$subtitle`"
+author: "Roy Francis"
+date: last-modified
+date-format: DD-MM-YYYY
+description: "`r params$description`"
+title-block-banner: true
+format: 
+  html:
+    toc: true
+    toc-title: ""
+    number-sections: true
+    number-depth: 3 
+    code-fold: true
+    page-layout: full
+    standalone: true
+    lightbox: auto
+execute: 
+  eval: true
+  echo: true
+  message: false
+  warning: false
+  results: hold
+params:
+  title: "Title"
+  subtitle: "Subtitle"
+  description: "Description"
+  batch: "batch"
+  grp: "grp"
+  label: "label"
+  path: "."
+  dims_umap_max: 20
+  metrics_ilp: 21
+  metrics_red: "umap"
+---
+
+```{r}
+# library(dplyr)
+# library(tidyr)
+library(stringr)
+library(ggplot2)
+library(glue)
+# library(ggpubr)
+library(randomcoloR)
+# remotes::install_github("tpq/peakRAM")
+library(peakRAM)
+
+library(Seurat)
+
+# remotes::install_github('satijalab/seurat-data')
+# library(SeuratData)
+# InstallData("panc8")
+# remotes::install_github('satijalab/seurat-wrappers')
+library(SeuratWrappers)
+# remotes::install_github("hms-dbmi/conos")
+# library(conos)
+# remotes::install_github("immunogenomics/harmony")
+# library(harmony)
+# remotes::install_github("welch-lab/liger")
+# library(rliger)
+# remotes::install_github("carmonalab/STACAS")
+# library(STACAS)
+# remotes::install_github("cellgeni/sceasy")
+# library(sceasy)
+# library(batchelor)
+# scanorama, scvi-tools
+# library(reticulate)
+
+# remotes::install_github("carmonalab/scIntegrationMetrics")
+library(scIntegrationMetrics)
+
+library(plummy)
+library(showtext)
+plummy::import_barlow()
+showtext::showtext_auto()
+showtext::showtext_opts(dpi = 300)
+
+# set future globals size to 6.2GB
+options(future.globals.maxSize = 6.2 * 1024 * 1024^2)
+```
+
+```{r}
+#| echo: false
+
+batch <- ifelse(is.null(params$batch),"batch",params$batch)
+grp <- ifelse(is.null(params$grp),"seurat_annotations",params$grp)
+label <- ifelse(is.null(params$label),"label",params$label)
+path <- ifelse(is.null(params$path),".",params$path)
+dims_umap_max <- ifelse(is.null(params$dims_umap_max),20,as.integer(params$dims_umap_max))
+dims_umap <- 1:dims_umap_max
+metrics_ilp <- ifelse(is.null(params$metrics_ilp),21,as.integer(params$metrics_ilp))
+metrics_red <- ifelse(is.null(params$metrics_red),"umap",params$metrics_red)
+```
+
+```{r}
+suffix <- c(
+  "original",
+  "cca",
+  "cca-sct",
+  "rpca",
+  "fastmnn",
+  "harmony",
+  "liger",
+  "conos",
+  "stacas",
+  "stacas-grp",
+  "scanorama",
+  "scvi"
+)
+
+method_names <- c("Original", "Seurat CCA", "Seurat CCA SCT", "Seurat RPCA", "FastMNN", "Harmony", "Liger", "Conos", "STACAS", "STACAS Grp", "Scanorama", "scVI")
+path_rds <- file.path(path, paste0(label, "-seurat-", suffix, ".rds"))
+path_memtime <- file.path(path, paste0(label, "-memtime-", suffix, ".rds"))
+path_metrics <- file.path(path, paste0(label, "-metrics-", suffix, ".rds"))
+
+plt <- function(obj, red = "umap", grp = "batch", label = NULL, cols = NULL) {
+  # cols <- c("#f1948a", "#c39bd3", "#85c1e9", "#a2d9ce", "#f9e79f", "#fad7a0", "#e74c3c", "#8e44ad", "#3498db", "#138d75", "#27ae60", "#f1c40f", "#f39c12", "#e67e22", "#95a5a6", "#5d6d7e")
+
+  l <- length(unique(obj[[]][, grp]))
+  if (is.null(cols)) cols <- randomcoloR::distinctColorPalette(l)
+  lpos <- "top"
+  if (l > 30) lpos <- "none"
+
+  x <- DimPlot(obj, group.by = grp, reduction = red, pt.size = 0.3, alpha = 0.8) +
+    scale_colour_manual(values = cols) +
+    labs(title = label) +
+    theme_umap() +
+    theme(
+      legend.position = lpos,
+    )
+
+  rm(obj)
+  gc()
+  return(x)
+}
+
+fn_plots <- function(path, red = "umap", grp = "celltype", label = NULL, path_umap = NULL, cols = NULL, export = FALSE) {
+  showtext::showtext_auto()
+  showtext::showtext_opts(dpi = 300)
+  if (!is.null(label)) message(paste0("Running ", label, "..."))
+  x <- plt(readRDS(path), red = red, grp = grp, label = label, cols = cols)
+  if (export) {
+    message(paste0("Exporting ", path_umap))
+    ggsave(path_umap, x, height = 5.5, width = 5)
+  }
+  return(x)
+}
+
+fn_memtime <- function(path, label = NULL) {
+  dfr <- readRDS(path)[, c("Elapsed_Time_sec", "Total_RAM_Used_MiB", "Peak_RAM_Used_MiB")]
+  colnames(dfr) <- c("time_sec", "total_ram_mb", "peak_ram_mb")
+  dfr$method <- label
+  return(dfr)
+}
+
+fn_metrics <- function(path, label = NULL) {
+  dfr <- as.data.frame(readRDS(path))
+  dfr$method <- label
+  return(dfr)
+}
+
+fn_getmetrics <- function(seu, batch, grp, metrics_ilp, metrics_red) {
+  tbl <- table(seu[[]][, c(grp, batch)])
+  if (any(tbl == 0)) {
+    seu <- subset(seu, subset = !!sym(grp) %in% names(which(rowSums(tbl > 0) >= ncol(tbl))))
+    seu@meta.data[] <- lapply(seu@meta.data, function(x) if (is.factor(x)) droplevels(x) else x)
+  }
+
+  return(getIntegrationMetrics(seu,
+    meta.label = grp,
+    meta.batch = batch,
+    iLISI_perplexity = metrics_ilp,
+    method.reduction = metrics_red
+  ))
+}
+
+theme_umap <- function() {
+  theme_minimal(base_family = "barlow", base_size = 9) +
+    theme(
+      panel.grid = element_blank(),
+      axis.text = element_blank(),
+      axis.title = element_blank(),
+      axis.ticks = element_blank(),
+      plot.margin = margin(10, 10, 10, 10),
+      plot.title = element_text(hjust = 0.5),
+      plot.subtitle = element_text(hjust = 0.5),
+      plot.background = element_rect(fill = "white", color = "white"),
+      legend.key.spacing.y = unit(0, "cm")
+    )
+}
+
+theme_report <- function() {
+  theme_minimal(base_family = "barlow", base_size = 9) +
+    theme(
+      plot.margin = margin(15, 15, 15, 15),
+      plot.background = element_rect(fill = "white", color = "white")
+    )
+}
+
+cols_bright <- c("#FF363CFF", "#6EE2FFFF", "#F7C530FF", "#95CC5EFF", "#D0DFE6FF", "#F79D1EFF", "#748AA6FF", "#017A4AFF", "#3D98D3FF", "#7559A2FF", "#794924FF", "#A6CEE3", "#34495e")
+```
+
+Parameters defined in the report:
+
+```{r}
+#| echo: false
+#| output: asis
+
+cat(paste0("**label**: "), label, "<br>")
+cat(paste0("**batch**: "), batch, "<br>")
+cat(paste0("**grp**: "), grp, "<br>")
+cat(paste0("**dims_umap_max**: "), max(dims_umap), "<br>")
+cat(paste0("**metrics_ilp**: "), metrics_ilp, "<br>")
+cat(paste0("**metrics_red**: "), metrics_red, "<br>")
+cat(paste0("**path**: "), path, "<br>")
+```
+
+## Original
+
+```{r}
+obj <- readRDS(file.path(path,"obj.rds"))
+# copy the batch variable as batch
+obj$batch <- obj[[]][,batch]
+obj
+table(obj[[]][,batch])
+```
+
+```{r}
+#| eval: true
+#| message: true
+
+# remove batches less than 30 cells
+dfr <- as.data.frame(table(obj[[]][,batch]))
+dfr1 <- dfr |> dplyr::filter(Freq>30)
+if(nrow(dfr)!=nrow(dfr1)) {
+  message("Of ",nrow(dfr)," batches, ",paste0(nrow(dfr)-nrow(dfr1)," batches discarded because they contain less than 30 cells. Final number of batches: ",nrow(dfr1),"."))
+  obj <- subset(obj,subset=batch %in% dfr1$Var1)
+  obj
+  table(obj[[]][,batch])
+}
+
+# create and save color palettes the first time
+if(!file.exists(file.path(path,paste0(label,"-seurat-original.rds")))){
+
+  # if grp length is more than 13, create distinct colors
+  if (length(unique(obj[[]][,grp])) > length(cols_bright)){
+    cols_grp <- randomcoloR::distinctColorPalette(length(unique(obj[[]][,grp])))
+  }else(
+    cols_grp <- cols_bright
+  )
+  
+  cols_batch <- randomcoloR::distinctColorPalette(length(unique(obj[[]][,batch])))
+  saveRDS(cols_grp,file.path(path,"colors-grp.rds"))
+  saveRDS(cols_batch,file.path(path,"colors-batch.rds"))
+} else{
+  cols_grp <- readRDS(file.path(path,"colors-grp.rds"))
+  cols_batch <- readRDS(file.path(path,"colors-batch.rds"))
+}
+
+rm(dfr,dfr1)
+```
+
+```{r}
+if (!file.exists(file.path(path, paste0(label, "-seurat-original.rds")))) {
+  gc()
+  set.seed(123)
+
+  memtime <- peakRAM({
+    obj1 <- obj |>
+      NormalizeData() |>
+      ScaleData() |>
+      FindVariableFeatures() |>
+      RunPCA(npcs = 30, seed.use = 123) |>
+      RunUMAP(dims = dims_umap, seed.use = 123)
+  })
+
+  obj1
+
+  metrics <- fn_getmetrics(obj1,batch=batch,grp=grp,metrics_ilp=metrics_ilp,metrics_red=metrics_red)
+  saveRDS(metrics, file.path(path, paste0(label, "-metrics-original.rds")))
+  saveRDS(memtime, file.path(path, paste0(label, "-memtime-original.rds")))
+  ggsave(file.path(path, paste0(label, "-umap-", grp, "-original.png")), plt(obj1, grp = grp, cols = cols_grp))
+  ggsave(file.path(path, paste0(label, "-umap-", batch, "-original.png")), plt(obj1, grp = batch, cols = cols_batch))
+  saveRDS(obj1, file.path(path, paste0(label, "-seurat-original.rds")))
+}
+```
+
+## Methods
+### Seurat CCA
+
+```{r}
+if (!file.exists(file.path(path, paste0(label, "-seurat-cca.rds")))) {
+  gc()
+  set.seed(123)
+
+  memtime <- peakRAM({
+    obj.list <- SplitObject(obj, split.by = "batch")
+    for (i in 1:length(obj.list)) {
+      obj.list[[i]] <- NormalizeData(obj.list[[i]], verbose = FALSE)
+      obj.list[[i]] <- FindVariableFeatures(obj.list[[i]],
+        selection.method = "vst",
+        nfeatures = 2000, verbose = FALSE
+      )
+    }
+    panchors <- FindIntegrationAnchors(object.list = obj.list)
+
+    obj1 <- IntegrateData(anchorset = panchors, k.weight = 30) |>
+      ScaleData() |>
+      RunPCA(assay = "integrated", npcs = 30, seed.use = 123) |>
+      RunUMAP(dims = dims_umap, seed.use = 123)
+  })
+
+  obj1
+
+  metrics <- fn_getmetrics(obj1, batch = batch, grp = grp, metrics_ilp = metrics_ilp, metrics_red = metrics_red)
+  saveRDS(metrics, file.path(path, paste0(label, "-metrics-cca.rds")))
+  ggsave(file.path(path, paste0(label, "-umap-", grp, "-cca.png")), plt(obj1, grp = grp, cols = cols_grp))
+  ggsave(file.path(path, paste0(label, "-umap-", batch, "-cca.png")), plt(obj1, grp = batch, cols = cols_batch))
+  saveRDS(memtime, file.path(path, paste0(label, "-memtime-cca.rds")))
+  saveRDS(obj1, file.path(path, paste0(label, "-seurat-cca.rds")))
+  rm(obj1)
+}
+```
+
+### Seurat CCA SCT
+
+```{r}
+if (!file.exists(file.path(path, paste0(label, "-seurat-cca-sct.rds")))) {
+  gc()
+  set.seed(123)
+
+  memtime <- peakRAM({
+    obj.list <- SplitObject(obj, split.by = "batch")
+    for (i in 1:length(obj.list)) {
+      obj.list[[i]] <- SCTransform(obj.list[[i]], return.only.var.genes = F)
+    }
+    pfeatures <- SelectIntegrationFeatures(obj.list, nfeatures = 2000)
+    obj.list <- Seurat::PrepSCTIntegration(obj.list, anchor.features = pfeatures)
+    panchors <- FindIntegrationAnchors(object.list = obj.list, normalization.method = "SCT", anchor.features = pfeatures)
+    obj1 <- IntegrateData(anchorset = panchors, normalization.method = "SCT", k.weight = 30)
+    DefaultAssay(obj1) <- "integrated"
+    obj1 <- RunPCA(obj1, nps = 30, seed.use = 123)
+    obj1 <- RunUMAP(obj1, dims = dims_umap, seed.use = 123)
+  })
+  obj1
+
+  metrics <- fn_getmetrics(obj1, batch = batch, grp = grp, metrics_ilp = metrics_ilp, metrics_red = metrics_red)
+  saveRDS(metrics, file.path(path, paste0(label, "-metrics-cca-sct.rds")))
+  ggsave(file.path(path, paste0(label, "-umap-", grp, "-cca-sct.png")), plt(obj1, grp = grp, cols = cols_grp))
+  ggsave(file.path(path, paste0(label, "-umap-", batch, "-cca-sct.png")), plt(obj1, grp = batch, cols = cols_batch))
+  saveRDS(memtime, file.path(path, paste0(label, "-memtime-cca-sct.rds")))
+  saveRDS(obj1, file.path(path, paste0(label, "-seurat-cca-sct.rds")))
+  rm(obj1)
+}
+```
+
+### Seurat RPCA
+
+```{r}
+if (!file.exists(file.path(path, paste0(label, "-seurat-rpca.rds")))) {
+  gc()
+  set.seed(123)
+
+  memtime <- peakRAM({
+    obj.list <- SplitObject(obj, split.by = "batch")
+    obj.list <- lapply(X = obj.list, FUN = function(x) {
+      x <- NormalizeData(x)
+      x <- FindVariableFeatures(x, selection.method = "vst", nfeatures = 2000)
+    })
+
+    pfeatures <- SelectIntegrationFeatures(object.list = obj.list)
+    obj.list <- lapply(X = obj.list, FUN = function(x) {
+      x <- ScaleData(x, features = pfeatures, verbose = FALSE)
+      x <- RunPCA(x, features = pfeatures, verbose = FALSE, seed.use = 123, npcs = 30)
+    })
+
+    panchors <- FindIntegrationAnchors(object.list = obj.list, anchor.features = pfeatures, reduction = "rpca")
+    obj1 <- IntegrateData(anchorset = panchors, k.weight = 30)
+    obj1 <- obj1 |>
+      ScaleData() |>
+      RunPCA(nps = 30, seed.use = 123) |>
+      RunUMAP(dims = dims_umap, seed.use = 123)
+  })
+
+  obj1
+
+  metrics <- fn_getmetrics(obj1, batch = batch, grp = grp, metrics_ilp = metrics_ilp, metrics_red = metrics_red)
+  saveRDS(metrics, file.path(path, paste0(label, "-metrics-rpca.rds")))
+  ggsave(file.path(path, paste0(label, "-umap-", grp, "-rpca.png")), plt(obj1, grp = grp, cols = cols_grp))
+  ggsave(file.path(path, paste0(label, "-umap-", batch, "-rpca.png")), plt(obj1, grp = batch, cols = cols_batch))
+  saveRDS(memtime, file.path(path, paste0(label, "-memtime-rpca.rds")))
+  saveRDS(obj1, file.path(path, paste0(label, "-seurat-rpca.rds")))
+  rm(obj1)
+}
+```
+
+### Harmony
+
+```{r}
+if (!file.exists(file.path(path, paste0(label, "-seurat-harmony.rds")))) {
+  gc()
+  set.seed(123)
+
+  memtime <- peakRAM({
+    library(harmony)
+    obj1 <- obj |>
+      NormalizeData() |>
+      FindVariableFeatures() |>
+      ScaleData() |>
+      RunPCA(verbose = FALSE, nps = 30, seed.use = 123) |>
+      RunHarmony(group.by.vars = "batch") |>
+      RunUMAP(reduction = "harmony", dims = dims_umap, seed.use = 123)
+  })
+  obj1
+
+  metrics <- fn_getmetrics(obj1, batch = batch, grp = grp, metrics_ilp = metrics_ilp, metrics_red = metrics_red)
+  saveRDS(metrics, file.path(path, paste0(label, "-metrics-harmony.rds")))
+  ggsave(file.path(path, paste0(label, "-umap-", grp, "-harmony.png")), plt(obj1, grp = grp, cols = cols_grp))
+  ggsave(file.path(path, paste0(label, "-umap-", batch, "-harmony.png")), plt(obj1, grp = batch, cols = cols_batch))
+  saveRDS(memtime, file.path(path, paste0(label, "-memtime-harmony.rds")))
+  saveRDS(obj1, file.path(path, paste0(label, "-seurat-harmony.rds")))
+  rm(obj1)
+}
+```
+
+### Liger
+
+```{r}
+if (!file.exists(file.path(path, paste0(label, "-seurat-liger.rds")))) {
+  gc()
+  set.seed(123)
+
+  memtime <- peakRAM({
+    library(rliger)
+    obj1 <- obj
+    obj1[["RNA"]] <- split(obj1[["RNA"]], f = obj1$batch)
+    obj1 <- obj1 |>
+      normalize() |>
+      selectGenes() |>
+      scaleNotCenter() |>
+      runINMF(k = 20) |>
+      quantileNorm(nNeighbors = 5) |>
+      RunUMAP(dims = dims_umap, reduction = "inmf", seed.use = 123)
+  })
+  obj1
+
+  metrics <- fn_getmetrics(obj1, batch = batch, grp = grp, metrics_ilp = metrics_ilp, metrics_red = metrics_red)
+  saveRDS(metrics, file.path(path, paste0(label, "-metrics-liger.rds")))
+  ggsave(file.path(path, paste0(label, "-umap-", grp, "-liger.png")), plt(obj1, grp = grp, cols = cols_grp))
+  ggsave(file.path(path, paste0(label, "-umap-", batch, "-liger.png")), plt(obj1, grp = batch, cols = cols_batch))
+  saveRDS(memtime, file.path(path, paste0(label, "-memtime-liger.rds")))
+  saveRDS(obj1, file.path(path, paste0(label, "-seurat-liger.rds")))
+  rm(obj1)
+}
+```
+
+### FastMNN
+
+```{r}
+if (!file.exists(file.path(path, paste0(label, "-seurat-fastmnn.rds")))) {
+  gc()
+  set.seed(123)
+
+  memtime <- peakRAM({
+    library(batchelor)
+    obj1 <- obj |>
+      NormalizeData() |>
+      FindVariableFeatures()
+
+    obj1 <- RunFastMNN(object.list = SplitObject(obj1, split.by = "batch")) |>
+      RunUMAP(reduction = "mnn", dims = dims_umap, seed.use = 123)
+  })
+  obj1
+
+  metrics <- fn_getmetrics(obj1, batch = batch, grp = grp, metrics_ilp = metrics_ilp, metrics_red = metrics_red)
+  saveRDS(metrics, file.path(path, paste0(label, "-metrics-fastmnn.rds")))
+  ggsave(file.path(path, paste0(label, "-umap-", grp, "-fastmnn.png")), plt(obj1, grp = grp, cols = cols_grp))
+  ggsave(file.path(path, paste0(label, "-umap-", batch, "-fastmnn.png")), plt(obj1, grp = batch, cols = cols_batch))
+  saveRDS(memtime, file.path(path, paste0(label, "-memtime-fastmnn.rds")))
+  saveRDS(obj1, file.path(path, paste0(label, "-seurat-fastmnn.rds")))
+  rm(obj1)
+}
+```
+
+### STACAS
+
+```{r}
+if (!file.exists(file.path(path, paste0(label, "-seurat-stacas.rds")))) {
+  gc()
+  set.seed(123)
+
+  memtime <- peakRAM({
+    library(STACAS)
+    obj1 <- obj |>
+      NormalizeData() |>
+      SplitObject(split.by = "batch") |>
+      Run.STACAS(min.sample.size = 20) |>
+      RunUMAP(dims = dims_umap, seed.use = 123)
+  })
+  obj1
+
+  metrics <- fn_getmetrics(obj1, batch = batch, grp = grp, metrics_ilp = metrics_ilp, metrics_red = metrics_red)
+  saveRDS(metrics, file.path(path, paste0(label, "-metrics-stacas.rds")))
+  ggsave(file.path(path, paste0(label, "-umap-", grp, "-stacas.png")), plt(obj1, grp = grp, cols = cols_grp))
+  ggsave(file.path(path, paste0(label, "-umap-", batch, "-stacas.png")), plt(obj1, grp = batch, cols = cols_batch))
+  saveRDS(memtime, file.path(path, paste0(label, "-memtime-stacas.rds")))
+  saveRDS(obj1, file.path(path, paste0(label, "-seurat-stacas.rds")))
+  rm(obj1)
+}
+```
+
+### STACAS Grp
+
+STACAS run in semi-supervised mode where celltypes are specified.
+
+```{r}
+if (!file.exists(file.path(path, paste0(label, "-seurat-stacas-grp.rds")))) {
+  gc()
+  set.seed(123)
+
+  memtime <- peakRAM({
+    library(STACAS)
+    obj1 <- obj |>
+      NormalizeData() |>
+      SplitObject(split.by = "batch") |>
+      Run.STACAS(min.sample.size = 20, cell.labels = grp) |>
+      RunUMAP(dims = dims_umap, seed.use = 123)
+  })
+  obj1
+
+  metrics <- fn_getmetrics(obj1, batch = batch, grp = grp, metrics_ilp = metrics_ilp, metrics_red = metrics_red)
+  saveRDS(metrics, file.path(path, paste0(label, "-metrics-stacas-grp.rds")))
+  ggsave(file.path(path, paste0(label, "-umap-", grp, "-stacas-grp.png")), plt(obj1, grp = grp, cols = cols_grp))
+  ggsave(file.path(path, paste0(label, "-umap-", batch, "-stacas-grp.png")), plt(obj1, grp = batch, cols = cols_batch))
+  saveRDS(memtime, file.path(path, paste0(label, "-memtime-stacas-grp.rds")))
+  saveRDS(obj1, file.path(path, paste0(label, "-seurat-stacas-grp.rds")))
+  rm(obj1)
+}
+```
+
+### Conos
+
+```{r}
+if (!file.exists(file.path(path, paste0(label, "-seurat-conos.rds")))) {
+  gc()
+  set.seed(123)
+
+  memtime <- peakRAM({
+    library(conos)
+    obj.panel <- SplitObject(obj, split.by = "batch")
+    for (i in 1:length(obj.panel)) {
+      obj.panel[[i]] <- NormalizeData(obj.panel[[i]]) |>
+        FindVariableFeatures() |>
+        ScaleData() |>
+        RunPCA(verbose = FALSE, nps = 30, seed.use = 123)
+    }
+    obj.con <- Conos$new(obj.panel)
+    rm(obj.panel)
+    obj.con$buildGraph(k = 15, k.self = 5, space = "PCA", ncomps = 20, n.odgenes = 2000, matching.method = "mNN", metric = "angular", score.component.variance = TRUE, verbose = FALSE)
+    obj.con$findCommunities()
+    obj.con$embedGraph()
+    obj1 <- as.Seurat(obj.con)
+    obj1[["umap"]] <- obj1[["largeVis"]]
+  })
+
+  obj1
+
+  metrics <- fn_getmetrics(obj1, batch = batch, grp = grp, metrics_ilp = metrics_ilp, metrics_red = metrics_red)
+  saveRDS(metrics, file.path(path, paste0(label, "-metrics-conos.rds")))
+  ggsave(file.path(path, paste0(label, "-umap-", grp, "-conos.png")), plt(obj1, grp = grp, cols = cols_grp))
+  ggsave(file.path(path, paste0(label, "-umap-", batch, "-conos.png")), plt(obj1, grp = batch, cols = cols_batch))
+  saveRDS(memtime, file.path(path, paste0(label, "-memtime-conos.rds")))
+  saveRDS(obj1, file.path(path, paste0(label, "-seurat-conos.rds")))
+  rm(obj1)
+}
+```
+
+### Scanorama
+
+```{r}
+if (!file.exists(file.path(path, paste0(label, "-seurat-scanorama.rds")))) {
+  memtime <- peakRAM({
+    Sys.setenv(PYTHONPATH="/home/rstudio/.local/lib/python3.10/site-packages")
+    library(reticulate)
+    #reticulate::use_condaenv("/crex/proj/snic2022-22-328/nobackup/roy/integration/conda/scanpy")
+    gc()
+    set.seed(123)
+    scanorama <- import("scanorama")
+
+    obj1 <- obj |> NormalizeData()
+    obj1.list <- SplitObject(obj1, split.by = "batch")
+    assaylist <- list()
+    genelist <- list()
+    for (i in 1:length(obj1.list))
+    {
+      assaylist[[i]] <- t(as.matrix(GetAssayData(obj1.list[[i]], assay = "RNA", layer = "data")))
+      genelist[[i]] <- rownames(obj1.list[[i]])
+    }
+
+    mat_integrated <- scanorama$integrate(assaylist, genelist)
+    dr_scanorama <- do.call(rbind, mat_integrated[[1]])
+    rownames(dr_scanorama) <- do.call(c, lapply(assaylist, rownames))
+    dr_scanorama <- dr_scanorama[colnames(obj1), ]
+    obj2 <- obj
+    obj2[["scanorama"]] <- CreateDimReducObject(dr_scanorama, key = "SCANORAMA_")
+    obj2 <- RunUMAP(obj2, reduction = "scanorama", dims = dims_umap, seed.use = 123)
+  })
+  obj2
+
+  metrics <- fn_getmetrics(obj2, batch = batch, grp = grp, metrics_ilp = metrics_ilp, metrics_red = metrics_red)
+  saveRDS(metrics, file.path(path, paste0(label, "-metrics-scanorama.rds")))
+  ggsave(file.path(path, paste0(label, "-umap-", grp, "-scanorama.png")), plt(obj2, grp = grp, cols = cols_grp))
+  ggsave(file.path(path, paste0(label, "-umap-", batch, "-scanorama.png")), plt(obj2, grp = batch, cols = cols_batch))
+  saveRDS(memtime, file.path(path, paste0(label, "-memtime-scanorama.rds")))
+  saveRDS(obj2, file.path(path, paste0(label, "-seurat-scanorama.rds")))
+  rm(obj1,obj2)
+}
+```
+
+### scVI
+
+```{r}
+if (!file.exists(file.path(path, paste0(label, "-seurat-scvi.rds")))) {
+  gc()
+  start_time <- Sys.time()
+
+  memtime <- peakRAM({
+    Sys.setenv(PYTHONPATH="/home/rstudio/.local/lib/python3.10/site-packages")
+    library(reticulate)
+    library(sceasy)
+    set.seed(123)
+    #use_condaenv("/crex/proj/snic2022-22-328/nobackup/roy/integration/conda/scanpy")
+    sc <- import("scanpy", convert = FALSE)
+    scvi <- import("scvi", convert = FALSE)
+    # Trainer(accelerator='gpu')
+
+    obj1 <- obj |>
+      NormalizeData(normalization.method = "LogNormalize", scale.factor = 10000) |>
+      FindVariableFeatures(selection.method = "vst", nfeatures = 2000)
+
+    # convert v5 assay to v3/4 assay since sceasy is outdated
+    obj1[["RNA"]] <- as(obj1[["RNA"]], "Assay")
+    adata <- sceasy::convertFormat(obj1, from = "seurat", to = "anndata", main_layer = "counts", drop_single_values = FALSE)
+    print(adata)
+
+    # run setup_anndata, use column stim for batch
+    scvi$model$SCVI$setup_anndata(adata, batch_key = "batch")
+    # scvi$settings.dl_num_workers <- as.integer(8)
+    # create the model
+    model <- scvi$model$SCVI(adata)
+    # train the model
+    # model$train()
+    # to specify the number of epochs when training:
+    model$train(max_epochs = as.integer(100))
+    latent <- model$get_latent_representation()
+
+    latent <- as.matrix(latent)
+    rownames(latent) <- colnames(obj1)
+    obj1[["scvi"]] <- CreateDimReducObject(embeddings = latent, key = "scvi_", assay = DefaultAssay(obj1))
+    obj1 <- RunUMAP(obj1, dims = 1:ncol(obj1@reductions$scvi@cell.embeddings), reduction = "scvi", n.components = 2, seed.use = 123)
+  })
+  obj1
+
+  metrics <- fn_getmetrics(obj1, batch = batch, grp = grp, metrics_ilp = metrics_ilp, metrics_red = metrics_red)
+  saveRDS(metrics, file.path(path, paste0(label, "-metrics-scvi.rds")))
+
+  saveRDS(as.numeric(difftime(Sys.time(), start_time, units = "mins")), file.path(path, paste0(label, "-time-scvi.rds")))
+  ggsave(file.path(path, paste0(label, "-umap-", grp, "-scvi.png")), plt(obj1, grp = grp, cols = cols_grp))
+  ggsave(file.path(path, paste0(label, "-umap-", batch, "-scvi.png")), plt(obj1, grp = batch, cols = cols_batch))
+  saveRDS(memtime, file.path(path, paste0(label, "-memtime-scvi.rds")))
+  saveRDS(obj1, file.path(path, paste0(label, "-seurat-scvi.rds")))
+  rm(obj1)
+}
+```
+
+Note that scVI can also be run in supervised mode by providing cell type annotation. This is called scANVI.
+
+## Compare
+### UMAP
+
+```{r}
+library(ggpubr)
+path_umap_v <- file.path(path,paste0(label,"-umap-",grp,"-",suffix,".png"))
+ulist1 <- mapply(fn_plots, path = path_rds, label = method_names, path_umap = path_umap_v, MoreArgs = list(grp = grp, cols = cols_grp, export = TRUE), SIMPLIFY = FALSE)
+
+g <- ggpubr::ggarrange(plotlist = ulist1, ncol = 4, nrow = 3, common.legend = TRUE)
+g <- annotate_figure(p = g, top = text_grob(paste0(label," • ",grp), face = "bold", size = 10, family = "barlow", color = "#2e4053"))+ 
+  bgcolor("white") + 
+  border("white")
+ggsave(file.path(path, paste0(label, "-integration-umap-", grp, ".png")), g, dpi = 250, height = 24.5, width = 24, units = "cm")
+```
+
+```{r}
+#| eval: true
+#| echo: false
+#| output: asis
+
+cat(paste0("![UMAP plots of various data integration methods. Cells colored by ",grp,".](", label, "/", label, "-integration-umap-", grp, ".png", ")"))
+```
+
+```{r}
+path_umap_v <- file.path(path,paste0(label,"-umap-",batch,"-",suffix,".png"))
+ulist2 <- mapply(fn_plots, path=path_rds, label=method_names, path_umap = path_umap_v, MoreArgs=list(grp=batch, cols=cols_batch, export=TRUE),SIMPLIFY=FALSE)
+
+g <- ggpubr::ggarrange(plotlist=ulist2,ncol=4,nrow=3,common.legend=TRUE)
+g <- annotate_figure(p = g, top = text_grob(paste0(label," • ",batch), face = "bold", size = 10, family = "barlow", color = "#2e4053"))+ 
+  bgcolor("white") +
+  border("white")
+ggsave(file.path(path,paste0(label,"-integration-umap-",batch,".png")),g,dpi=250,height=24,width=24,units="cm")
+```
+
+```{r}
+#| eval: true
+#| echo: false
+#| output: asis
+
+cat(paste0("![UMAP plots of various data integration methods. Cells colored by ",batch,".](", label, "/", label, "-integration-umap-", batch, ".png", ")"))
+```
+
+### Metrics
+
+```{r}
+library(dplyr)
+dfr <- bind_rows(mapply(fn_metrics, path = path_metrics, label = method_names, SIMPLIFY = FALSE))
+
+g <- dfr |>
+  mutate(method = factor(method, levels = rev(method_names))) |>
+  tidyr::pivot_longer(!method, names_to = "metric", values_to = "value") |>
+  mutate(metric = factor(metric, levels = c("iLISI","norm_iLISI","CiLISI","CiLISI_means","norm_cLISI","norm_cLISI_means","celltype_ASW","celltype_ASW_means"))) |>
+  ggplot(aes(method, value)) +
+  geom_bar(stat = "identity") +
+  facet_wrap(~metric, scales = "free_x", nrow = 2) +
+  coord_flip() +
+  labs(x = "", y = "") +
+  theme_report()
+ggsave(file.path(path, paste0(label, "-integration-metrics.png")), g, dpi = 250, height = 15, width = 24, units = "cm")
+
+g <- dfr |>
+  mutate(method = factor(method, levels = rev(method_names))) |>
+  tidyr::pivot_longer(!method, names_to = "metric", values_to = "value") |>
+  filter(metric %in% c("norm_iLISI","norm_cLISI","celltype_ASW")) |>
+  mutate(metric = factor(metric, levels = c("norm_iLISI","norm_cLISI","celltype_ASW"))) |>
+  ggplot(aes(method, value)) +
+  geom_bar(stat = "identity") +
+  facet_wrap(~metric, scales = "free_x", ncol = 1) +
+  coord_flip() +
+  labs(x = "", y = "") +
+  theme_report()
+ggsave(file.path(path, paste0(label, "-integration-metrics-slim.png")), g, dpi = 250, height = 20, width = 7, units = "cm")
+```
+
+```{r}
+#| eval: true
+#| echo: false
+#| output: asis
+
+cat(paste0("![Various integration metrics across methods.](",label,"/",label, "-integration-metrics.png", ")"))
+```
+
+```{r}
+library(GGally)
+p <- dfr %>%
+  GGally::ggpairs(columns=1:8,upper = list(continuous = wrap("cor", size = 2)),lower=list(continuous = wrap("points", alpha = 0.8, size=0.6)))
+p <- p+theme_report()
+ggsave(file.path(path, paste0(label, "-integration-metrics-pairs.png")), p, dpi = 250, height = 20, width = 20, units = "cm")
+```
+
+```{r}
+#| eval: true
+#| echo: false
+#| output: asis
+
+cat(paste0("![Correlation between integration metrics.](",label,"/",label, "-integration-metrics-pairs.png", ")"))
+```
+
+### Time & Memory
+
+```{r}
+library(dplyr)
+dfr <- bind_rows(mapply(fn_memtime, path = path_memtime, label = method_names, SIMPLIFY = FALSE)) |>
+  arrange(time_sec) |>
+  mutate(time_min = round(time_sec / 60, 2))
+
+g1 <- dfr %>%
+  arrange(time_min) |>
+  mutate(method = factor(method, levels = unique(method))) |>
+  ggplot(aes(method, time_min)) +
+  geom_bar(stat = "identity") +
+  scale_y_continuous(trans = "log1p", breaks = c(1, 2, 3, 4, 5, 10, 15, 30, 50, 100, 150, 200)) +
+  coord_flip() +
+  labs(x = "", y = "Log Time (Min)") +
+  theme_report()
+ggsave(file.path(path, paste0(label, "-integration-time.png")), g1, dpi = 250, height = 8, width = 14, units = "cm")
+
+g2 <- dfr %>%
+  arrange(peak_ram_mb) |>
+  mutate(method = factor(method, levels = unique(method))) |>
+  ggplot(aes(method, peak_ram_mb)) +
+  geom_bar(stat = "identity") +
+  # scale_y_continuous(trans="log1p",breaks=c(1,2,3,4,5,10,15,30,50,100,150))+
+  coord_flip() +
+  labs(x = "", y = "Peak RAM used (MB)") +
+  theme_report()
+ggsave(file.path(path, paste0(label, "-integration-mem-peak.png")), g2, dpi = 250, height = 8, width = 14, units = "cm")
+
+g3 <- dfr %>%
+  arrange(total_ram_mb) |>
+  mutate(method = factor(method, levels = unique(method))) |>
+  ggplot(aes(method, total_ram_mb)) +
+  geom_bar(stat = "identity") +
+  # scale_y_continuous(trans="log1p",breaks=c(1,2,3,4,5,10,15,30,50,100,150))+
+  coord_flip() +
+  labs(x = "", y = "Total RAM used (MB)") +
+  theme_report()
+ggsave(file.path(path, paste0(label, "-integration-mem-total.png")), g3, dpi = 250, height = 8, width = 14, units = "cm")
+
+g4 <- dfr %>%
+  mutate(method = factor(method, levels = method_names)) |>
+  ggplot(aes(time_min, peak_ram_mb)) +
+  geom_point() +
+  geom_text(aes(label = method), size = 3, nudge_x = 0.2, hjust = 0) +
+  scale_x_continuous(trans = "log1p", breaks = c(1, 2, 3, 4, 5, 10, 15, 30, 50, 100, 150, 200)) +
+  labs(y = "Peak RAM used (MB)", x = "Log Time (Min)") +
+  theme_report()
+ggsave(file.path(path, paste0(label, "-integration-memtime-scatter.png")), g4, dpi = 250, height = 15, width = 15, units = "cm")
+
+g <- ggpubr::ggarrange(g1, g2, g3, g4, ncol = 2, nrow = 2)
+ggsave(file.path(path, paste0(label, "-integration-memtime.png")), g, dpi = 250, height = 20, width = 22, units = "cm")
+```
+
+```{r}
+#| eval: true
+#| echo: false
+#| output: asis
+
+cat(paste0("![(Top left) Total time taken, (Top right) peak memory usage, (Bottom left) and total memory usage for each method. (Bottom right) Scatterplot between peak memory usage and time.](", label, "/", label, "-integration-memtime.png", ")"))
+```
+
+## Versions
+
+```{r}
+#| eval: true
+#| results: hold
+paste0("Seurat: ", packageVersion("Seurat"))
+paste0("harmony: ", packageVersion("harmony"))
+paste0("rliger: ", packageVersion("rliger"))
+paste0("batchelor: ", packageVersion("batchelor"))
+paste0("STACAS: ", packageVersion("STACAS"))
+paste0("conos: ", packageVersion("conos"))
+
+Sys.setenv(PYTHONPATH="/home/rstudio/.local/lib/python3.10/site-packages")
+library(reticulate)
+#use_condaenv("/crex/proj/snic2022-22-328/nobackup/roy/integration/conda/scanpy")
+scanorama <- import("scanorama")
+scvi <- import("scvi", convert = FALSE)
+
+paste0("scanorama: ", scanorama$`__version__`)
+paste0("scvi-tools: ", scvi$`__version__`)
+```
+
+## Session
+
+```{r}
+sessionInfo()
+```
