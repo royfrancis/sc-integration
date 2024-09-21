@@ -1,0 +1,2 @@
+Bootstrap: docker
+From: ghcr.io/royfrancis/r44q15s5:1.0.4
