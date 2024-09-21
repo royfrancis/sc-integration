@@ -154,14 +154,37 @@ fn_metrics <- function(path, label = NULL) {
   return(dfr)
 }
 
-fn_getmetrics <- function(seu, batch, grp, metrics_ilp, metrics_red) {
-  tbl <- table(seu[[]][, c(grp, batch)])
+#' @description Get integration metrics
+#' @param obj Seurat v5 object
+#' @param batch Batch variable
+#' @param grp Group variable (celltype)
+#' @param metrics_ilp Perplexity value
+#' @param metrics_red Reduction to use
+#' @param n Max number of cells per cluster
+#' 
+fn_getmetrics <- function(obj, batch, grp, metrics_ilp=21, metrics_red="umap",n=5000) {
+  tbl <- table(obj[[]][, c(grp, batch)])
   if (any(tbl == 0)) {
-    seu <- subset(seu, subset = !!sym(grp) %in% names(which(rowSums(tbl > 0) >= ncol(tbl))))
-    seu@meta.data[] <- lapply(seu@meta.data, function(x) if (is.factor(x)) droplevels(x) else x)
+    cat("Removing group-batches with zero counts...\n")
+    obj <- subset(obj, subset = !!sym(grp) %in% names(which(rowSums(tbl > 0) >= ncol(tbl))))
   }
 
-  return(getIntegrationMetrics(seu,
+  Idents(obj) <- as.character(obj[[]][,batch])
+  if(any(table(obj[[]][,batch])>n)) {
+    cat(paste0("\nNumber of cells per ",batch," larger than ",n,". Downsampling...\n"))
+    obj <- subset(obj, downsample = n)
+  }
+
+  obj@meta.data[] <- lapply(obj@meta.data, function(x) if (is.factor(x)) droplevels(x) else x)
+
+  cat("Preview:\n")
+  print(obj)
+  cat("\n")
+  cat("Counts by group and batch:\n")
+  print(table(obj[[]][, c(grp, batch)]))
+  cat("\n")
+
+  return(getIntegrationMetrics(obj,
     meta.label = grp,
     meta.batch = batch,
     iLISI_perplexity = metrics_ilp,
@@ -489,7 +512,7 @@ if (!file.exists(file.path(path, paste0(label, "-seurat-stacas.rds")))) {
     obj1 <- obj |>
       NormalizeData() |>
       SplitObject(split.by = "batch") |>
-      Run.STACAS(min.sample.size = 20) |>
+      Run.STACAS(min.sample.size = 20, k.weight = 30) |>
       RunUMAP(dims = dims_umap, seed.use = 123)
   })
   obj1
@@ -518,7 +541,7 @@ if (!file.exists(file.path(path, paste0(label, "-seurat-stacas-grp.rds")))) {
     obj1 <- obj |>
       NormalizeData() |>
       SplitObject(split.by = "batch") |>
-      Run.STACAS(min.sample.size = 20, cell.labels = grp) |>
+      Run.STACAS(min.sample.size = 20, cell.labels = grp, k.weight = 30) |>
       RunUMAP(dims = dims_umap, seed.use = 123)
   })
   obj1
@@ -845,7 +868,6 @@ paste0("conos: ", packageVersion("conos"))
 
 Sys.setenv(PYTHONPATH="/home/rstudio/.local/lib/python3.10/site-packages")
 library(reticulate)
-#use_condaenv("/crex/proj/snic2022-22-328/nobackup/roy/integration/conda/scanpy")
 scanorama <- import("scanorama")
 scvi <- import("scvi", convert = FALSE)
 
