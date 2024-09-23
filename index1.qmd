@@ -598,7 +598,8 @@ if (!file.exists(file.path(path, paste0(label, "-seurat-conos.rds")))) {
 ```{r}
 if (!file.exists(file.path(path, paste0(label, "-seurat-scanorama.rds")))) {
   memtime <- peakRAM({
-    Sys.setenv(PYTHONPATH="/home/rstudio/.local/lib/python3.10/site-packages")
+    # Sys.setenv(PYTHONPATH="/home/rstudio/.local/lib/python3.10/site-packages")
+    Sys.setenv(PYTHONPATH="/usr/lib/python3.10/site-packages")
     library(reticulate)
     #reticulate::use_condaenv("/crex/proj/snic2022-22-328/nobackup/roy/integration/conda/scanpy")
     gc()
@@ -643,7 +644,8 @@ if (!file.exists(file.path(path, paste0(label, "-seurat-scvi.rds")))) {
   start_time <- Sys.time()
 
   memtime <- peakRAM({
-    Sys.setenv(PYTHONPATH="/home/rstudio/.local/lib/python3.10/site-packages")
+    # Sys.setenv(PYTHONPATH="/home/rstudio/.local/lib/python3.10/site-packages")
+    Sys.setenv(PYTHONPATH="/usr/lib/python3.10/site-packages")
     library(reticulate)
     library(sceasy)
     set.seed(123)
@@ -866,7 +868,8 @@ paste0("batchelor: ", packageVersion("batchelor"))
 paste0("STACAS: ", packageVersion("STACAS"))
 paste0("conos: ", packageVersion("conos"))
 
-Sys.setenv(PYTHONPATH="/home/rstudio/.local/lib/python3.10/site-packages")
+# Sys.setenv(PYTHONPATH="/home/rstudio/.local/lib/python3.10/site-packages")
+Sys.setenv(PYTHONPATH="/usr/lib/python3.10/site-packages")
 library(reticulate)
 scanorama <- import("scanorama")
 scvi <- import("scvi", convert = FALSE)
