@@ -14,7 +14,7 @@ Computations were run on Uppmax Dardel cluster. A docker container with all nece
 docker pull ghcr.io/royfrancis/r44q15s5:1.0.4
 ```
 
-The docker image is converted to a sif file locally on Dardel using `apptainer.def` definition file.
+The docker image is converted to a sif file on Dardel using `apptainer.def` definition file.
 
 ```bash
 sbatch build.sh
